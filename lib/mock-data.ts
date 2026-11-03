@@ -25,7 +25,7 @@ export const organizations: Organization[] = [
     members: ['u-1', 'u-2', 'u-4', 'u-5'],
     dailySignupCap: 15,
     signups: [
-      { date: '2026-11-03', attendees: ['u-1', 'u-2', 'u-4', 'u-5', 'u-3', 'u-6', 'u-7', 'u-8', 'u-9', 'u-10', 'u-11', 'u-12', 'u-13'] },
+      { date: '2026-11-03', attendees: ['u-1', 'u-2', 'u-4', 'u-5'] },
       { date: '2026-11-04', attendees: ['u-1', 'u-2', 'u-4', 'u-5'] }
     ],
     projects: [
@@ -67,7 +67,7 @@ export const organizations: Organization[] = [
     members: ['u-1', 'u-3', 'u-4'],
     dailySignupCap: 15,
     signups: [
-      { date: '2026-11-03', attendees: ['u-1', 'u-3', 'u-4', 'u-12', 'u-13', 'u-14'] },
+      { date: '2026-11-03', attendees: ['u-1', 'u-3', 'u-4'] },
       { date: '2026-11-04', attendees: ['u-1', 'u-3'] }
     ],
     projects: [
