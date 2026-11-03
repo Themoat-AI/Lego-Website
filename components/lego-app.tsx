@@ -1,351 +1,292 @@
 'use client';
 
-import { useMemo, useState } from 'react';
-import { currentUser, organizations, users } from '@/lib/mock-data';
+import { FormEvent, useCallback, useEffect, useState } from 'react';
+import type { User } from '@supabase/supabase-js';
+import { supabase } from '@/lib/supabase';
 
-type ChatDraft = {
-  [key: string]: string;
+type Organization = {
+  id: string;
+  name: string;
+  focus: string;
+  description: string;
 };
 
+type Profile = {
+  id: string;
+  username: string;
+};
+
+const today = () => new Date().toISOString().slice(0, 10);
+
 export default function LegoApp() {
+  const [user, setUser] = useState<User | null>(null);
+  const [profile, setProfile] = useState<Profile | null>(null);
+  const [organizations, setOrganizations] = useState<Organization[]>([]);
+  const [signupCounts, setSignupCounts] = useState<Record<string, number>>({});
+  const [selectedOrg, setSelectedOrg] = useState('');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [username, setUsername] = useState('');
   const [orgName, setOrgName] = useState('');
   const [focus, setFocus] = useState('City scenes');
   const [description, setDescription] = useState('');
-  const [selectedOrg, setSelectedOrg] = useState(organizations[0].id);
-  const [chatDrafts, setChatDrafts] = useState<ChatDraft>({});
-  const [activeTab, setActiveTab] = useState<'overview' | 'projects' | 'chat' | 'signups'>('overview');
+  const [registering, setRegistering] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
 
-  const selectedOrganization = useMemo(
-    () => organizations.find((org) => org.id === selectedOrg) || organizations[0],
-    [selectedOrg]
-  );
-
-  const todayKey = new Date().toISOString().slice(0, 10);
-  const todaysSignupCount = selectedOrganization.signups.find((entry) => entry.date === todayKey)?.attendees.length ?? 0;
-  const signupSpaceLeft = Math.max(selectedOrganization.dailySignupCap - todaysSignupCount, 0);
-
-  const handleCreateUsername = () => {
-    const cleaned = username.trim();
-    if (!cleaned) return;
-    alert(`Username created: @${cleaned}`);
-    setUsername('');
-  };
-
-  const handleCreateOrg = () => {
-    if (!orgName.trim()) return;
-    alert(`Organization created: ${orgName} (${focus})`);
-    setOrgName('');
-    setDescription('');
-  };
-
-  const handleSignUpForDay = () => {
-    if (signupSpaceLeft <= 0) {
-      alert('This organization is full for today. Maximum is 15 signups per day.');
+  const loadOrganizations = useCallback(async () => {
+    if (!supabase) return;
+    const { data, error: loadError } = await supabase
+      .from('organizations')
+      .select('id, name, focus, description')
+      .order('created_at', { ascending: false });
+    if (loadError) {
+      setError(loadError.message);
       return;
     }
 
-    alert(`Signed up for ${selectedOrganization.name}! You are #${todaysSignupCount + 1} today.`);
+    const liveOrganizations = data ?? [];
+    setOrganizations(liveOrganizations);
+    setSelectedOrg((current) => current || liveOrganizations[0]?.id || '');
+
+    const counts = await Promise.all(
+      liveOrganizations.map(async (organization) => {
+        const { count, error: countError } = await supabase!
+          .from('daily_signups')
+          .select('id', { count: 'exact', head: true })
+          .eq('organization_id', organization.id)
+          .eq('event_date', today());
+        if (countError) throw countError;
+        return [organization.id, count ?? 0] as const;
+      })
+    ).catch((countError: Error) => {
+      setError(countError.message);
+      return [] as readonly (readonly [string, number])[];
+    });
+    setSignupCounts(Object.fromEntries(counts));
+  }, []);
+
+  useEffect(() => {
+    if (!supabase) {
+      setLoading(false);
+      return;
+    }
+
+    let active = true;
+    const client = supabase;
+    client.auth.getSession().then(({ data, error: sessionError }) => {
+      if (!active) return;
+      if (sessionError) setError(sessionError.message);
+      setUser(data.session?.user ?? null);
+      setLoading(false);
+    });
+    const { data: listener } = client.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+      setProfile(null);
+      setOrganizations([]);
+      setSignupCounts({});
+      setSelectedOrg('');
+      setError('');
+      setNotice('');
+    });
+
+    return () => {
+      active = false;
+      listener.subscription.unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!user || !supabase) return;
+    let active = true;
+    const client = supabase;
+    client.from('profiles').select('id, username').eq('id', user.id).maybeSingle().then(({ data, error: profileError }) => {
+      if (!active) return;
+      if (profileError) setError(profileError.message);
+      if (data) {
+        setProfile(data);
+        void loadOrganizations();
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, [user, loadOrganizations]);
+
+  const handleAuthentication = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!supabase) return;
+    setBusy(true);
+    setError('');
+    setNotice('');
+    const result = registering
+      ? await supabase.auth.signUp({
+          email: email.trim(),
+          password,
+          options: { data: { username: username.trim() } }
+        })
+      : await supabase.auth.signInWithPassword({ email: email.trim(), password });
+    setBusy(false);
+
+    if (result.error) {
+      setError(result.error.message);
+      return;
+    }
+    if (registering && !result.data.session) {
+      setNotice('Check your email to confirm your account, then sign in.');
+    }
   };
 
-  const handleSendMessage = () => {
-    const message = (chatDrafts[selectedOrganization.id] || '').trim();
-    if (!message) return;
-    alert(`Chat message sent to ${selectedOrganization.name}: ${message}`);
-    setChatDrafts((prev) => ({ ...prev, [selectedOrganization.id]: '' }));
+  const saveUsername = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!supabase || !user) return;
+    const cleaned = username.trim();
+    if (!cleaned) return;
+    setBusy(true);
+    setError('');
+    const { data, error: saveError } = await supabase
+      .from('profiles')
+      .upsert({ id: user.id, username: cleaned }, { onConflict: 'id' })
+      .select('id, username')
+      .single();
+    setBusy(false);
+    if (saveError) {
+      setError(saveError.message);
+      return;
+    }
+    setProfile(data);
+    await loadOrganizations();
   };
 
-  const tabs = [
-    { id: 'overview', label: 'Overview' },
-    { id: 'projects', label: 'Projects' },
-    { id: 'chat', label: 'Chat' },
-    { id: 'signups', label: 'Signups' }
-  ] as const;
+  const createOrganization = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!supabase || !user) return;
+    setBusy(true);
+    setError('');
+    const { error: createError } = await supabase.from('organizations').insert({
+      owner_id: user.id,
+      name: orgName.trim(),
+      focus,
+      description: description.trim()
+    });
+    setBusy(false);
+    if (createError) {
+      setError(createError.message);
+      return;
+    }
+    setOrgName('');
+    setDescription('');
+    await loadOrganizations();
+  };
+
+  const signUpForEvent = async () => {
+    if (!supabase || !selectedOrg) return;
+    setBusy(true);
+    setError('');
+    setNotice('');
+    const { error: signupError } = await supabase.rpc('signup_for_event', {
+      p_organization_id: selectedOrg,
+      p_event_date: today()
+    });
+    setBusy(false);
+    if (signupError) {
+      setError(signupError.message);
+      return;
+    }
+    setNotice('Your signup is confirmed.');
+    await loadOrganizations();
+  };
+
+  const signOut = async () => {
+    if (!supabase) return;
+    const { error: signOutError } = await supabase.auth.signOut();
+    if (signOutError) setError(signOutError.message);
+  };
+
+  const selectedOrganization = organizations.find((organization) => organization.id === selectedOrg);
+  const signupCount = selectedOrg ? signupCounts[selectedOrg] ?? 0 : 0;
 
   return (
     <main className="min-h-screen px-4 py-10 text-slate-800 md:px-8">
-      <div className="mx-auto max-w-7xl">
-        <header className="rounded-[2rem] border border-sky-200 bg-white/80 p-6 shadow-lego backdrop-blur-sm">
-          <div className="flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
-            <div>
-              <p className="mb-2 inline-flex rounded-full bg-yellow-200 px-3 py-1 text-xs font-bold uppercase tracking-[0.22em] text-sky-900">
-                BrickBuddy League
-              </p>
-              <h1 className="text-4xl font-black tracking-tight text-sky-900 md:text-5xl">
-                Build teamwork, one LEGO brick at a time.
-              </h1>
-            </div>
-            <div className="flex gap-3">
-              <span className="rounded-full bg-green-100 px-3 py-2 text-sm font-semibold text-green-700">
-                Supabase ready
-              </span>
-              <span className="rounded-full bg-orange-100 px-3 py-2 text-sm font-semibold text-orange-700">
-                Firebase linked
-              </span>
-            </div>
+      <div className="mx-auto max-w-5xl">
+        <header className="rounded-[2rem] border border-sky-200 bg-white/90 p-6 shadow-lego">
+          <p className="mb-2 inline-flex rounded-full bg-yellow-200 px-3 py-1 text-xs font-bold uppercase tracking-[0.22em] text-sky-900">BrickBuddy League</p>
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <h1 className="text-3xl font-black text-sky-900 md:text-5xl">Build together, one LEGO brick at a time.</h1>
+            {user && <button onClick={signOut} className="rounded-xl bg-slate-100 px-4 py-2 font-bold hover:bg-slate-200">Sign out</button>}
           </div>
+          <p className="mt-3 text-slate-600">Accounts, organizations, and event signups are saved to the connected database. No demo accounts or sample signups are shown.</p>
         </header>
 
-        <section className="mt-8 grid gap-6 xl:grid-cols-[1.3fr_0.7fr]">
-          <div className="rounded-[2rem] bg-gradient-to-br from-sky-600 via-blue-600 to-indigo-700 p-6 text-white shadow-lego">
-            <p className="mb-3 inline-flex rounded-full bg-white/15 px-3 py-1 text-xs font-bold uppercase tracking-[0.22em]">
-              Kid friendly platform
-            </p>
-            <h2 className="text-3xl font-black md:text-4xl">Make a username. Start an organization. Build epic LEGO adventures.</h2>
-            <p className="mt-4 max-w-xl text-base text-sky-100">
-              Kids can create profiles, join LEGO clubs, manage projects, request missing pieces, and sign up for event days with a strict 15-person cap.
-            </p>
-            <div className="mt-6 flex flex-wrap gap-4 text-sm font-semibold">
-              <span className="rounded-full bg-white/10 px-4 py-2">Username creation</span>
-              <span className="rounded-full bg-white/10 px-4 py-2">Org management</span>
-              <span className="rounded-full bg-white/10 px-4 py-2">Daily scheduling</span>
-            </div>
-          </div>
+        {error && <p role="alert" className="mt-5 rounded-xl bg-red-50 p-4 text-red-800">{error}</p>}
+        {notice && <p role="status" className="mt-5 rounded-xl bg-green-50 p-4 text-green-800">{notice}</p>}
 
-          <div className="rounded-[2rem] border border-sky-200 bg-white p-6 shadow-lego">
-            <p className="mb-2 text-xs font-bold uppercase tracking-[0.24em] text-sky-700">Signed in as</p>
-            <div className="rounded-2xl bg-sky-50 p-4">
-              <p className="text-2xl font-black text-sky-900">@{currentUser.username}</p>
-              <p className="mt-1 text-sm text-slate-600">{currentUser.displayName} • {currentUser.ageGroup}</p>
-            </div>
-            <div className="mt-5 grid gap-3 text-sm text-slate-600">
-              <div className="flex items-center justify-between rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
-                <span>Organizations</span>
-                <span className="font-black text-slate-900">{currentUser.organizationIds.length}</span>
-              </div>
-              <div className="flex items-center justify-between rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
-                <span>Projects in progress</span>
-                <span className="font-black text-slate-900">{organizations.reduce((sum, org) => sum + org.projects.length, 0)}</span>
-              </div>
-              <div className="flex items-center justify-between rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
-                <span>Daily signup cap</span>
-                <span className="font-black text-slate-900">15</span>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <section className="mt-8 grid gap-6 lg:grid-cols-2">
-          <div className="rounded-[2rem] border border-sky-200 bg-white p-6 shadow-lego">
-            <h3 className="text-2xl font-black text-sky-900">Create username</h3>
-            <div className="mt-4 flex gap-3">
-              <input
-                value={username}
-                onChange={(event) => setUsername(event.target.value)}
-                placeholder="Choose a username"
-                className="w-full rounded-xl border border-sky-200 bg-sky-50 px-4 py-3 outline-none ring-0 transition focus:border-sky-400"
-              />
-              <button onClick={handleCreateUsername} className="rounded-xl bg-sky-600 px-5 py-3 font-bold text-white transition hover:bg-sky-700">
-                Save
-              </button>
-            </div>
-            <div className="mt-4 rounded-2xl bg-slate-50 p-4 text-sm text-slate-600">
-              Username examples: <span className="font-bold text-slate-800">brickwizard</span>, <span className="font-bold text-slate-800">castlehero</span>, <span className="font-bold text-slate-800">tinyengineer</span>
-            </div>
-          </div>
-
-          <div className="rounded-[2rem] border border-sky-200 bg-white p-6 shadow-lego">
-            <h3 className="text-2xl font-black text-sky-900">Create organization</h3>
-            <div className="mt-4 space-y-3">
-              <input
-                value={orgName}
-                onChange={(event) => setOrgName(event.target.value)}
-                placeholder="Organization name"
-                className="w-full rounded-xl border border-sky-200 bg-sky-50 px-4 py-3 outline-none focus:border-sky-400"
-              />
-              <select
-                value={focus}
-                onChange={(event) => setFocus(event.target.value)}
-                className="w-full rounded-xl border border-sky-200 bg-sky-50 px-4 py-3 outline-none focus:border-sky-400"
-              >
-                <option>City scenes</option>
-                <option>Castle builds</option>
-                <option>Space adventures</option>
-                <option>Vehicle builds</option>
-              </select>
-              <textarea
-                value={description}
-                onChange={(event) => setDescription(event.target.value)}
-                placeholder="Describe your Lego team goals"
-                rows={3}
-                className="w-full rounded-xl border border-sky-200 bg-sky-50 px-4 py-3 outline-none focus:border-sky-400"
-              />
-              <button onClick={handleCreateOrg} className="w-full rounded-xl bg-yellow-400 px-5 py-3 font-black text-sky-900 transition hover:bg-yellow-300">
-                Start organization
-              </button>
-            </div>
-          </div>
-        </section>
-
-        <section className="mt-8 rounded-[2rem] border border-sky-200 bg-white p-6 shadow-lego">
-          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-            <div>
-              <p className="text-xs font-bold uppercase tracking-[0.2em] text-sky-700">Organization dashboard</p>
-              <h3 className="text-3xl font-black text-sky-900">Choose a team</h3>
-            </div>
-            <select
-              value={selectedOrg}
-              onChange={(event) => setSelectedOrg(event.target.value)}
-              className="rounded-xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm font-semibold text-slate-700 outline-none focus:border-sky-400"
-            >
-              {organizations.map((org) => (
-                <option key={org.id} value={org.id}>
-                  {org.name}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div className="mt-6 flex flex-wrap gap-2">
-            {tabs.map((tab) => (
-              <button
-                key={tab.id}
-                onClick={() => setActiveTab(tab.id)}
-                className={`rounded-full px-4 py-2 text-sm font-bold transition ${activeTab === tab.id ? 'bg-sky-600 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'}`}
-              >
-                {tab.label}
-              </button>
-            ))}
-          </div>
-
-          {activeTab === 'overview' && (
-            <div className="mt-6 grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
-              <div className="rounded-3xl bg-sky-50 p-5">
-                <p className="text-xs font-bold uppercase tracking-[0.2em] text-sky-700">{selectedOrganization.focus}</p>
-                <h4 className="mt-2 text-3xl font-black text-sky-900">{selectedOrganization.name}</h4>
-                <p className="mt-3 text-slate-700">{selectedOrganization.description}</p>
-                <div className="mt-5 flex flex-wrap gap-2 text-sm text-slate-700">
-                  {selectedOrganization.members.map((memberId) => {
-                    const member = users.find((user) => user.id === memberId);
-                    return member ? (
-                      <span key={member.id} className="rounded-full bg-white px-3 py-1 font-semibold shadow-sm">
-                        @{member.username}
-                      </span>
-                    ) : null;
-                  })}
+        {!supabase ? (
+          <section className="mt-8 rounded-3xl border border-orange-200 bg-orange-50 p-6">
+            <h2 className="text-xl font-black text-orange-900">Authentication is not configured</h2>
+            <p className="mt-2 text-orange-800">Set the Supabase URL and anon key in the deployment environment, then apply <code>supabase/migrations/202611030001_live_accounts_and_signups.sql</code>. The app stays locked until a real authentication service is configured.</p>
+          </section>
+        ) : loading ? (
+          <p className="mt-8 rounded-2xl bg-white p-6">Loading account…</p>
+        ) : !user ? (
+          <section className="mt-8 max-w-xl rounded-3xl border border-sky-200 bg-white p-6 shadow-lego">
+            <h2 className="text-2xl font-black text-sky-900">{registering ? 'Create your account' : 'Sign in'}</h2>
+            <form onSubmit={handleAuthentication} className="mt-5 space-y-3">
+              {registering && <input required minLength={3} maxLength={24} value={username} onChange={(event) => setUsername(event.target.value)} placeholder="Choose a username" autoComplete="username" className="w-full rounded-xl border border-sky-200 bg-sky-50 px-4 py-3" />}
+              <input required type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="Email address" autoComplete="email" className="w-full rounded-xl border border-sky-200 bg-sky-50 px-4 py-3" />
+              <input required type="password" minLength={8} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Password (at least 8 characters)" autoComplete={registering ? 'new-password' : 'current-password'} className="w-full rounded-xl border border-sky-200 bg-sky-50 px-4 py-3" />
+              <button disabled={busy} className="w-full rounded-xl bg-sky-600 px-5 py-3 font-bold text-white disabled:opacity-60">{busy ? 'Please wait…' : registering ? 'Create account' : 'Sign in'}</button>
+            </form>
+            <button onClick={() => { setRegistering(!registering); setError(''); setNotice(''); }} className="mt-4 text-sm font-bold text-sky-700 underline">
+              {registering ? 'Already have an account? Sign in' : 'New here? Create an account'}
+            </button>
+          </section>
+        ) : !profile ? (
+          <section className="mt-8 max-w-xl rounded-3xl border border-sky-200 bg-white p-6 shadow-lego">
+            <h2 className="text-2xl font-black text-sky-900">Finish your profile</h2>
+            <form onSubmit={saveUsername} className="mt-5 flex gap-3">
+              <input required minLength={3} maxLength={24} value={username} onChange={(event) => setUsername(event.target.value)} placeholder="Choose a username" autoComplete="username" className="min-w-0 flex-1 rounded-xl border border-sky-200 bg-sky-50 px-4 py-3" />
+              <button disabled={busy} className="rounded-xl bg-sky-600 px-5 py-3 font-bold text-white disabled:opacity-60">Save</button>
+            </form>
+          </section>
+        ) : (
+          <>
+            <section className="mt-8 rounded-3xl border border-sky-200 bg-white p-6 shadow-lego">
+              <p className="text-sm font-bold uppercase tracking-wider text-sky-700">Signed in as @{profile.username}</p>
+              <h2 className="mt-2 text-2xl font-black text-sky-900">Organizations</h2>
+              {organizations.length === 0 ? <p className="mt-3 text-slate-600">No organizations yet. Create one to get started.</p> : (
+                <div className="mt-4 flex flex-wrap gap-2">
+                  {organizations.map((organization) => <button key={organization.id} onClick={() => setSelectedOrg(organization.id)} className={`rounded-full px-4 py-2 font-bold ${selectedOrg === organization.id ? 'bg-sky-600 text-white' : 'bg-slate-100 text-slate-700'}`}>{organization.name}</button>)}
                 </div>
-              </div>
-
-              <div className="rounded-3xl bg-gradient-to-br from-yellow-100 to-orange-100 p-5">
-                <p className="text-xs font-bold uppercase tracking-[0.2em] text-orange-700">Daily signups</p>
-                <div className="mt-3 flex items-end justify-between">
-                  <span className="text-4xl font-black text-slate-900">{todaysSignupCount}</span>
-                  <span className="text-sm font-bold text-slate-700">/ {selectedOrganization.dailySignupCap}</span>
-                </div>
-                <div className="mt-4 h-3 overflow-hidden rounded-full bg-white/80">
-                  <div
-                    className="h-full rounded-full bg-gradient-to-r from-sky-500 to-yellow-400"
-                    style={{ width: `${Math.min((todaysSignupCount / selectedOrganization.dailySignupCap) * 100, 100)}%` }}
-                  />
-                </div>
-                <p className="mt-4 text-sm text-slate-700">{signupSpaceLeft} spots left today</p>
-              </div>
-            </div>
-          )}
-
-          {activeTab === 'projects' && (
-            <div className="mt-6 grid gap-4 md:grid-cols-2">
-              {selectedOrganization.projects.map((project) => (
-                <div key={project.id} className="rounded-3xl border border-sky-200 bg-sky-50 p-5">
-                  <div className="flex items-center justify-between gap-3">
-                    <h4 className="text-xl font-black text-sky-900">{project.title}</h4>
-                    <span className="rounded-full bg-white px-2.5 py-1 text-xs font-bold uppercase tracking-[0.12em] text-sky-700">
-                      {project.status}
-                    </span>
-                  </div>
-                  <p className="mt-2 text-sm text-slate-600">Owner: <span className="font-bold text-slate-800">{project.owner}</span></p>
-                  <p className="mt-1 text-sm text-slate-600">Due: {project.dueDate}</p>
-                  <div className="mt-4">
-                    <p className="mb-2 text-sm font-bold uppercase tracking-[0.16em] text-slate-600">Needed pieces</p>
-                    <div className="flex flex-wrap gap-2">
-                      {project.neededPieces.map((piece) => (
-                        <span key={piece} className="rounded-full bg-yellow-200 px-3 py-1 text-xs font-bold text-sky-900">
-                          {piece}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                  <div className="mt-4 rounded-2xl bg-white p-3 text-sm text-slate-600">
-                    {project.updates.map((update) => (
-                      <p key={update} className="mb-2 last:mb-0">• {update}</p>
-                    ))}
+              )}
+              {selectedOrganization && (
+                <div className="mt-6 rounded-2xl bg-sky-50 p-5">
+                  <p className="text-sm font-bold uppercase tracking-wider text-sky-700">{selectedOrganization.focus}</p>
+                  <h3 className="mt-1 text-2xl font-black text-sky-900">{selectedOrganization.name}</h3>
+                  {selectedOrganization.description && <p className="mt-2 text-slate-700">{selectedOrganization.description}</p>}
+                  <div className="mt-5 flex flex-wrap items-center justify-between gap-4">
+                    <p className="font-bold text-slate-700">Today: {signupCount} / 15 actual signups</p>
+                    <button disabled={busy || signupCount >= 15} onClick={signUpForEvent} className="rounded-xl bg-yellow-400 px-5 py-3 font-black text-sky-900 disabled:cursor-not-allowed disabled:opacity-60">{signupCount >= 15 ? 'At daily limit' : 'Sign up for today'}</button>
                   </div>
                 </div>
-              ))}
-            </div>
-          )}
+              )}
+            </section>
 
-          {activeTab === 'chat' && (
-            <div className="mt-6 grid gap-4 lg:grid-cols-[0.9fr_1.1fr]">
-              <div className="rounded-3xl bg-slate-50 p-5">
-                {selectedOrganization.chat.map((thread) => (
-                  <div key={thread.id} className="rounded-2xl bg-white p-4 shadow-sm">
-                    <p className="text-sm font-bold uppercase tracking-[0.18em] text-sky-700">{thread.title}</p>
-                    <div className="mt-3 space-y-3">
-                      {thread.messages.map((message) => (
-                        <div key={message.id} className="rounded-xl bg-sky-50 p-3">
-                          <div className="flex items-center justify-between gap-2 text-xs font-bold uppercase tracking-[0.12em] text-slate-500">
-                            <span>{message.sender}</span>
-                            <span>{message.timestamp}</span>
-                          </div>
-                          <p className="mt-2 text-sm text-slate-700">{message.text}</p>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                ))}
-              </div>
-
-              <div className="rounded-3xl bg-sky-50 p-5">
-                <p className="text-xs font-bold uppercase tracking-[0.18em] text-sky-700">Send new message</p>
-                <textarea
-                  value={chatDrafts[selectedOrganization.id] || ''}
-                  onChange={(event) =>
-                    setChatDrafts((prev) => ({ ...prev, [selectedOrganization.id]: event.target.value }))
-                  }
-                  rows={6}
-                  placeholder="Type a message to your organization..."
-                  className="mt-3 w-full rounded-2xl border border-sky-200 bg-white p-4 text-slate-700 outline-none focus:border-sky-400"
-                />
-                <button onClick={handleSendMessage} className="mt-4 w-full rounded-xl bg-sky-600 px-5 py-3 font-bold text-white transition hover:bg-sky-700">
-                  Send to chat
-                </button>
-              </div>
-            </div>
-          )}
-
-          {activeTab === 'signups' && (
-            <div className="mt-6 grid gap-6 lg:grid-cols-[1fr_0.9fr]">
-              <div className="rounded-3xl bg-slate-50 p-5">
-                <p className="text-xs font-bold uppercase tracking-[0.2em] text-sky-700">Today</p>
-                <h4 className="mt-2 text-3xl font-black text-sky-900">{todaysSignupCount} / {selectedOrganization.dailySignupCap} signups</h4>
-                <div className="mt-4 h-4 overflow-hidden rounded-full bg-white">
-                  <div
-                    className="h-full rounded-full bg-gradient-to-r from-green-400 via-yellow-400 to-orange-400"
-                    style={{ width: `${Math.min((todaysSignupCount / selectedOrganization.dailySignupCap) * 100, 100)}%` }}
-                  />
-                </div>
-                <button onClick={handleSignUpForDay} className="mt-6 w-full rounded-xl bg-yellow-400 px-5 py-3 font-black text-sky-900 transition hover:bg-yellow-300">
-                  {signupSpaceLeft > 0 ? 'Sign up for this day' : 'At daily limit'}
-                </button>
-              </div>
-
-              <div className="rounded-3xl bg-sky-50 p-5">
-                <p className="text-xs font-bold uppercase tracking-[0.2em] text-sky-700">Recent booking history</p>
-                <div className="mt-4 space-y-3">
-                  {selectedOrganization.signups.map((signup) => (
-                    <div key={signup.date} className="rounded-2xl bg-white p-3">
-                      <div className="flex items-center justify-between gap-3">
-                        <span className="font-bold text-slate-800">{signup.date}</span>
-                        <span className="text-sm text-slate-600">{signup.attendees.length} people</span>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-          )}
-        </section>
+            <section className="mt-8 rounded-3xl border border-sky-200 bg-white p-6 shadow-lego">
+              <h2 className="text-2xl font-black text-sky-900">Create an organization</h2>
+              <form onSubmit={createOrganization} className="mt-5 grid gap-3 md:grid-cols-2">
+                <input required maxLength={80} value={orgName} onChange={(event) => setOrgName(event.target.value)} placeholder="Organization name" className="rounded-xl border border-sky-200 bg-sky-50 px-4 py-3" />
+                <select value={focus} onChange={(event) => setFocus(event.target.value)} className="rounded-xl border border-sky-200 bg-sky-50 px-4 py-3">
+                  <option>City scenes</option><option>Castle builds</option><option>Space adventures</option><option>Vehicle builds</option>
+                </select>
+                <textarea maxLength={500} value={description} onChange={(event) => setDescription(event.target.value)} placeholder="Describe your team" rows={3} className="rounded-xl border border-sky-200 bg-sky-50 px-4 py-3 md:col-span-2" />
+                <button disabled={busy} className="rounded-xl bg-sky-600 px-5 py-3 font-bold text-white disabled:opacity-60 md:col-span-2">{busy ? 'Saving…' : 'Create organization'}</button>
+              </form>
+            </section>
+          </>
+        )}
       </div>
     </main>
   );
